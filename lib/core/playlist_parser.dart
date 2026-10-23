@@ -5,6 +5,12 @@ import 'channel.dart';
 class PlaylistParser {
   const PlaylistParser._();
 
+  static final _m3uAttributes = <String, RegExp>{
+    'tvg-logo': RegExp(r'tvg-logo="([^"]*)"'),
+    'group-title': RegExp(r'group-title="([^"]*)"'),
+    'tvg-id': RegExp(r'tvg-id="([^"]*)"'),
+  };
+
   static bool isWebUrl(String value) {
     final uri = Uri.tryParse(value.trim());
     return uri != null &&
@@ -99,7 +105,7 @@ class PlaylistParser {
   }
 
   static String _attribute(String line, String key) {
-    final match = RegExp('${RegExp.escape(key)}="([^"]*)"').firstMatch(line);
+    final match = _m3uAttributes[key]?.firstMatch(line);
     return match?.group(1) ?? '';
   }
 

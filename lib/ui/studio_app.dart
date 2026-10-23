@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
@@ -12,6 +13,7 @@ import '../core/channel.dart';
 import '../core/playlist_parser.dart';
 import '../core/range_generator.dart';
 import '../core/stream_checker.dart';
+import 'json_splitter_page.dart';
 
 const _background = Color(0xff242424);
 const _side = Color(0xff292929);
@@ -75,6 +77,7 @@ class _StudioHomeState extends State<StudioHome> {
   final _randomCount = TextEditingController(text: '10');
   final _input = TextEditingController();
   final _filter = TextEditingController();
+  final _workers = TextEditingController(text: '12');
 
   late final Player _player;
   late final VideoController _video;
@@ -82,7 +85,8 @@ class _StudioHomeState extends State<StudioHome> {
   int _page = 0;
   String _idSource = 'Numeric range';
   String _pickedFile = 'No file selected';
-  final List<Channel> _loaded = [];
+  PlatformFile? _playlistFile;
+  List<Channel> _loaded = [];
   final List<Channel> _verified = [];
   final Map<String, StreamCheck> _checks = {};
   final List<String> _logs = [];
@@ -91,8 +95,11 @@ class _StudioHomeState extends State<StudioHome> {
   bool _testing = false;
   bool _cancelTesting = false;
   bool _importing = false;
+  String _importStatus = '';
+  bool _generating = false;
   bool _playing = false;
   int _tested = 0;
+  int _reachable = 0;
   double _volume = 75;
 
   @override
@@ -122,20 +129,20 @@ class _StudioHomeState extends State<StudioHome> {
     _player.dispose();
     for (final controller in [
       _pattern, _idFrom, _idTo, _cdnFrom, _cdnTo, _ipFrom, _ipTo,
-      _portFrom, _portTo, _idsText, _randomCount, _input, _filter,
+      _portFrom, _portTo, _idsText, _randomCount, _input, _filter, _workers,
     ]) {
       controller.dispose();
     }
     super.dispose();
   }
 
-  void _log(String message) {
+  void _log(String message, {bool repaint = true}) {
     final time = TimeOfDay.now();
     final stamp = '${time.hour.toString().padLeft(2, '0')}:'
         '${time.minute.toString().padLeft(2, '0')}';
     _logs.add('[$stamp] $message');
     if (_logs.length > 250) _logs.removeAt(0);
-    if (mounted) setState(() {});
+    if (mounted && repaint) setState(() {});
   }
 
   void _notice(String message) {
@@ -165,10 +172,6 @@ class _StudioHomeState extends State<StudioHome> {
         allowedExtensions: ['txt', 'csv'],
       );
       if (file == null) return;
-      final length = await file.length();
-      if (length == null || length > 1024 * 1024) {
-        throw const FormatException('ID file must be smaller than 1 MB.');
-      }
       _idsText.text = utf8.decode(await file.readAsBytes(), allowMalformed: true);
       setState(() => _idSource = 'Uploaded ID list');
       _notice('ID list loaded.');
@@ -177,24 +180,43 @@ class _StudioHomeState extends State<StudioHome> {
     }
   }
 
-  void _generate() {
+  Future<void> _generate() async {
+    if (_generating) return;
+    setState(() => _generating = true);
     try {
-      final ids = switch (_idSource) {
-        'Random IDs' => RangeGenerator.randomIds(_idFrom.text, _idTo.text, _randomCount.text),
-        'Pasted ID list' || 'Uploaded ID list' => RangeGenerator.idList(_idsText.text),
-        _ => RangeGenerator.numberRange(_idFrom.text, _idTo.text, 'ID'),
-      };
-      final channels = RangeGenerator.generate(
-        pattern: _pattern.text,
-        ids: ids,
-        cdns: RangeGenerator.numberRange(_cdnFrom.text, _cdnTo.text, 'CDN'),
-        ips: RangeGenerator.ipRange(_ipFrom.text, _ipTo.text),
-        ports: RangeGenerator.numberRange(_portFrom.text, _portTo.text, 'port'),
-      );
+      final idSource = _idSource;
+      final idFrom = _idFrom.text;
+      final idTo = _idTo.text;
+      final randomCount = _randomCount.text;
+      final idsText = _idsText.text;
+      final pattern = _pattern.text;
+      final cdnFrom = _cdnFrom.text;
+      final cdnTo = _cdnTo.text;
+      final ipFrom = _ipFrom.text;
+      final ipTo = _ipTo.text;
+      final portFrom = _portFrom.text;
+      final portTo = _portTo.text;
+      final channels = await Isolate.run(() {
+        final ids = switch (idSource) {
+          'Random IDs' => RangeGenerator.randomIds(idFrom, idTo, randomCount),
+          'Pasted ID list' || 'Uploaded ID list' => RangeGenerator.idList(idsText),
+          _ => RangeGenerator.numberRange(idFrom, idTo, 'ID'),
+        };
+        return RangeGenerator.generate(
+          pattern: pattern,
+          ids: ids,
+          cdns: RangeGenerator.numberRange(cdnFrom, cdnTo, 'CDN'),
+          ips: RangeGenerator.ipRange(ipFrom, ipTo),
+          ports: RangeGenerator.numberRange(portFrom, portTo, 'port'),
+        );
+      });
       if (channels.isEmpty) throw const FormatException('No valid HTTP(S) URLs generated.');
+      if (!mounted) return;
       _load(channels);
     } catch (e) {
       _notice('$e');
+    } finally {
+      if (mounted) setState(() => _generating = false);
     }
   }
 
@@ -205,14 +227,10 @@ class _StudioHomeState extends State<StudioHome> {
         allowedExtensions: ['m3u', 'm3u8', 'json', 'txt'],
       );
       if (file == null) return;
-      final length = await file.length();
-      if (length == null || length > 10 * 1024 * 1024) {
-        throw const FormatException('Playlist exceeds 10 MB.');
-      }
-      final content = utf8.decode(await file.readAsBytes(), allowMalformed: true);
       setState(() {
         _pickedFile = file.name;
-        _input.text = content;
+        _playlistFile = file;
+        _input.clear();
       });
       _notice('File ready: $_pickedFile');
     } catch (e) {
@@ -220,48 +238,129 @@ class _StudioHomeState extends State<StudioHome> {
     }
   }
 
-  Future<String> _fetchPlaylist(String url) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+  Future<File?> _fetchPlaylist(String url) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 5)
+      ..autoUncompress = true;
+    Directory? temporary;
+    IOSink? sink;
     try {
-      final request = await client.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 10));
-      final response = await request.close().timeout(const Duration(seconds: 10));
+      final request = await client.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 8));
+      final response = await request.close().timeout(const Duration(seconds: 12));
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw HttpException('HTTP ${response.statusCode}', uri: Uri.parse(url));
       }
-      final bytes = BytesBuilder(copy: false);
+      final mimeType = response.headers.contentType?.mimeType ?? '';
+      if (mimeType.startsWith('video/') ||
+          (mimeType.startsWith('audio/') && !mimeType.contains('mpegurl'))) {
+        return null;
+      }
+      temporary = await Directory.systemTemp.createTemp('m3u8_playlist_');
+      final file = File('${temporary.path}${Platform.pathSeparator}downloaded.txt');
+      final outputSink = file.openWrite();
+      sink = outputSink;
+      var received = 0;
+      var lastProgress = DateTime.now();
+      var firstChunk = true;
       await for (final chunk in response.timeout(const Duration(seconds: 12))) {
-        bytes.add(chunk);
-        if (bytes.length > 10 * 1024 * 1024) {
-          throw const FormatException('Remote playlist exceeds 10 MB.');
+        if (firstChunk) {
+          firstChunk = false;
+          final sample = utf8.decode(chunk.take(512).toList(), allowMalformed: true)
+              .replaceFirst('\ufeff', '').trimLeft();
+          final recognizable = sample.startsWith('{') || sample.startsWith('[') ||
+              sample.startsWith('#EXTM3U') || sample.startsWith('#EXTINF') ||
+              sample.startsWith('http://') || sample.startsWith('https://');
+          if (!recognizable) {
+            await outputSink.close();
+            sink = null;
+            await temporary.delete(recursive: true);
+            temporary = null;
+            return null;
+          }
+        }
+        outputSink.add(chunk);
+        received += chunk.length;
+        final now = DateTime.now();
+        if (now.difference(lastProgress).inMilliseconds >= 400 && mounted) {
+          final total = response.contentLength;
+          setState(() => _importStatus = total > 0
+              ? 'Downloading ${(100 * received / total).toStringAsFixed(1)}% · ${(received / 1048576).toStringAsFixed(1)} MB'
+              : 'Downloading ${(received / 1048576).toStringAsFixed(1)} MB');
+          lastProgress = now;
         }
       }
-      return utf8.decode(bytes.takeBytes(), allowMalformed: true);
+      await outputSink.flush();
+      await outputSink.close();
+      sink = null;
+      return file;
+    } catch (_) {
+      await sink?.close();
+      if (temporary != null && await temporary.exists()) {
+        await temporary.delete(recursive: true);
+      }
+      rethrow;
     } finally {
       client.close(force: true);
     }
   }
 
+  Future<List<Channel>> _parsePlaylistFile(String path, String source) => Isolate.run(() async {
+        final content = await File(path).readAsString();
+        return PlaylistParser.parse(content, source: source);
+      });
+
   Future<void> _import() async {
     if (_importing) return;
-    setState(() => _importing = true);
+    setState(() { _importing = true; _importStatus = 'Preparing input...'; });
     try {
       final raw = _input.text.trim();
-      var source = _pickedFile;
-      var text = raw;
-      if (PlaylistParser.isWebUrl(raw) && !raw.contains('\n')) {
-        final path = Uri.parse(raw).path.toLowerCase();
-        if (path.endsWith('.m3u') || path.endsWith('.json') || path.endsWith('.txt')) {
-          text = await _fetchPlaylist(raw);
-          source = raw;
+      late final List<Channel> channels;
+      if (raw.isEmpty && _playlistFile != null) {
+        final picked = _playlistFile!;
+        final sourceName = picked.name;
+        final filePath = picked.path;
+        if (filePath != null) {
+          setState(() => _importStatus = 'Parsing $sourceName in background...');
+          channels = await _parsePlaylistFile(filePath, sourceName);
+        } else {
+          final content = utf8.decode(await picked.readAsBytes(), allowMalformed: true);
+          setState(() => _importStatus = 'Parsing $sourceName in background...');
+          channels = await Isolate.run(() => PlaylistParser.parse(content, source: sourceName));
+        }
+      } else {
+        File? downloaded;
+        if (PlaylistParser.isWebUrl(raw) && !raw.contains('\n')) {
+          final path = Uri.parse(raw).path.toLowerCase();
+          final directStream = ['.m3u8', '.ts', '.mp4', '.mkv', '.avi', '.mpd']
+              .any(path.endsWith);
+          if (!directStream) {
+            downloaded = await _fetchPlaylist(raw);
+          }
+        }
+        try {
+          if (downloaded != null) {
+            setState(() => _importStatus = 'Parsing downloaded playlist in background...');
+            channels = await _parsePlaylistFile(downloaded.path, raw);
+          } else {
+            setState(() => _importStatus = 'Parsing input in background...');
+            channels = await Isolate.run(() => PlaylistParser.parse(raw, source: 'Pasted input'));
+          }
+        } finally {
+          if (downloaded != null) {
+            final tempDir = downloaded.parent;
+            if (await tempDir.exists()) {
+              await tempDir.delete(recursive: true);
+            }
+          }
         }
       }
-      final channels = PlaylistParser.parse(text, source: source);
       if (channels.isEmpty) throw const FormatException('No valid HTTP(S) entries found.');
+      if (!mounted) return;
       _load(channels);
     } catch (e) {
       _notice('Import failed: $e');
     } finally {
-      if (mounted) setState(() => _importing = false);
+      if (mounted) setState(() { _importing = false; _importStatus = ''; });
     }
   }
 
@@ -269,14 +368,13 @@ class _StudioHomeState extends State<StudioHome> {
     _cancelTesting = true;
     _player.stop();
     setState(() {
-      _loaded
-        ..clear()
-        ..addAll(channels);
+      _loaded = channels;
       _verified.clear();
       _checks.clear();
       _current = null;
       _selectedValid = null;
       _tested = 0;
+      _reachable = 0;
       _page = 3;
     });
     _log('[LOAD] ${channels.length} unique streams loaded');
@@ -284,33 +382,53 @@ class _StudioHomeState extends State<StudioHome> {
 
   Future<void> _check({required bool quick}) async {
     if (_testing || _loaded.isEmpty) return;
-    final targets = quick ? _loaded.take(50).toList() : List<Channel>.from(_loaded);
+    final targets = List<Channel>.from(_loaded);
+    final workerCount = int.tryParse(_workers.text.trim());
+    if (workerCount == null || workerCount < 1) {
+      _notice('Concurrent requests must be a positive number.');
+      return;
+    }
     setState(() {
       _testing = true;
       _cancelTesting = false;
       _tested = 0;
+      _reachable = 0;
       _checks.clear();
     });
-    _log('[TEST] HTTP checking ${targets.length} streams (4 concurrent)');
+    _log('[TEST] ${quick ? 'Fast HEAD' : 'HEAD/GET'} checking ${targets.length} streams ($workerCount concurrent)');
     var index = 0;
+    final refresh = Timer.periodic(const Duration(milliseconds: 200), (_) {
+      if (mounted) setState(() {});
+    });
     Future<void> worker() async {
-      while (!_cancelTesting && index < targets.length && mounted) {
-        final channel = targets[index++];
-        final result = await const StreamChecker().check(channel.url);
-        if (!mounted || _cancelTesting) break;
-        setState(() {
+      final checker = StreamChecker();
+      try {
+        while (!_cancelTesting && index < targets.length && mounted) {
+          final channel = targets[index++];
+          final result = await checker.check(channel.url, quick: quick);
+          if (!mounted || _cancelTesting) break;
           _checks[channel.url] = result;
           _tested++;
-        });
-        if (result.reachable) _log('[HTTP OK] ${channel.name} (${result.detail})');
+          if (result.reachable) {
+            _reachable++;
+            _log('[HTTP OK] ${channel.name} (${result.detail})', repaint: false);
+          }
+        }
+      } finally {
+        checker.close();
       }
     }
-    await Future.wait(List.generate(4, (_) => worker()));
+    try {
+      await Future.wait(List.generate(
+        workerCount < targets.length ? workerCount : targets.length, (_) => worker()));
+    } finally {
+      refresh.cancel();
+    }
     if (!mounted) return;
     final wasStopped = _cancelTesting;
     setState(() => _testing = false);
     _log('[DONE] Checked $_tested/${targets.length}; HTTP OK: '
-        '${_checks.values.where((e) => e.reachable).length}'
+        '$_reachable'
         '${wasStopped ? ' (stopped)' : ''}');
   }
 
@@ -388,12 +506,23 @@ class _StudioHomeState extends State<StudioHome> {
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(22, 22, 20, 16),
-                child: switch (_page) {
-                  0 => _dashboard(),
-                  1 => _rangePage(),
-                  2 => _filePage(),
-                  _ => _studioPage(),
-                },
+                child: Stack(children: [
+                  Positioned.fill(child: Offstage(
+                    offstage: _page == 4,
+                    child: switch (_page) {
+                      0 => _dashboard(),
+                      1 => _rangePage(),
+                      2 => _filePage(),
+                      3 => _studioPage(),
+                      _ => const SizedBox.shrink(),
+                    },
+                  )),
+                  // Keep split results alive when moving between sidebar tabs.
+                  Positioned.fill(child: Offstage(
+                    offstage: _page != 4,
+                    child: const JsonSplitterPage(),
+                  )),
+                ]),
               ),
             ),
           ],
@@ -418,6 +547,7 @@ class _StudioHomeState extends State<StudioHome> {
             _navigation(1, Icons.pin_outlined, 'ID Range Tester'),
             _navigation(2, Icons.folder_open_outlined, 'File / URL Tester'),
             _navigation(3, Icons.live_tv_outlined, 'Playlist & Player Studio'),
+            _navigation(4, Icons.splitscreen_outlined, 'Json Spliter'),
             const Spacer(),
             const Padding(
               padding: EdgeInsets.only(bottom: 16),
@@ -481,9 +611,10 @@ class _StudioHomeState extends State<StudioHome> {
                   style: TextStyle(color: _cyan, fontWeight: FontWeight.bold)),
               SizedBox(height: 12),
               Text('1. Load links from ID ranges, ID lists, an M3U/JSON file, or a URL.\n'
-                  '2. Use a pattern token to generate combinations (up to 5,000).\n'
+                  '2. Use a pattern token to generate URL combinations.\n'
                   '3. Quick Check tests HTTP availability; select a channel to try playback.\n'
-                  '4. Streams that start playing appear in the exportable list.'),
+                  '4. Streams that start playing appear in the exportable list.\n'
+                  '5. Use Json Spliter to divide large JSON files into parts.'),
               SizedBox(height: 12),
               Text('Only test playlists and streams you own or have permission to access.',
                   style: TextStyle(color: Color(0xffaab1b8), fontSize: 11)),
@@ -492,7 +623,7 @@ class _StudioHomeState extends State<StudioHome> {
           const SizedBox(height: 20),
           Wrap(spacing: 12, runSpacing: 12, children: [
             _metric('Loaded', '${_loaded.length}', Icons.playlist_play),
-            _metric('HTTP OK', '${_checks.values.where((e) => e.reachable).length}', Icons.check_circle_outline),
+            _metric('HTTP OK', '$_reachable', Icons.check_circle_outline),
             _metric('Playback started', '${_verified.length}', Icons.live_tv),
           ]),
         ]),
@@ -554,7 +685,8 @@ class _StudioHomeState extends State<StudioHome> {
           _inputRow('Start IP:', _ipFrom, 'End IP:', _ipTo, firstWidth: 135, secondWidth: 135),
           _inputRow('Start Port:', _portFrom, 'End Port:', _portTo, firstWidth: 90, secondWidth: 90),
           const SizedBox(height: 32),
-          _action('Load Links & Go to Testing Studio', _blue, _generate, height: 42),
+          _action(_generating ? 'Generating links...' : 'Load Links & Go to Testing Studio',
+              _blue, _generating ? null : _generate, height: 42),
         ]),
       );
 
@@ -586,6 +718,11 @@ class _StudioHomeState extends State<StudioHome> {
               Text(_pickedFile, style: const TextStyle(color: _cyan, fontSize: 12)),
               const SizedBox(height: 10),
               _action('Browse Playlist File', const Color(0xff3c3d40), _pickPlaylist, width: 180),
+              if (_playlistFile != null) const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text('Selected file is read directly when you click Load; it is not copied into the text box.',
+                    style: TextStyle(color: Colors.white60, fontSize: 11)),
+              ),
             ]),
           ),
           const SizedBox(height: 22),
@@ -602,6 +739,12 @@ class _StudioHomeState extends State<StudioHome> {
           const SizedBox(height: 20),
           _action(_importing ? 'Loading...' : 'Load & Proceed to Testing Studio',
               _green, _importing ? null : _import, height: 42),
+          if (_importing) ...[
+            const SizedBox(height: 12),
+            const LinearProgressIndicator(),
+            const SizedBox(height: 7),
+            Text(_importStatus, style: const TextStyle(color: _cyan, fontSize: 12)),
+          ],
         ]),
       );
 
@@ -631,13 +774,23 @@ class _StudioHomeState extends State<StudioHome> {
           Expanded(child: _action(_testing ? 'Stop Testing' : 'Start Testing',
               _green, _testing ? () => setState(() => _cancelTesting = true) : () => _check(quick: false))),
           const SizedBox(width: 9),
-          Expanded(child: _action('Quick Check List', _blue, _testing ? null : () => _check(quick: true))),
+          Expanded(child: _action('Quick HEAD Check', _blue, _testing ? null : () => _check(quick: true))),
           const SizedBox(width: 9),
           Expanded(child: _action('Save M3U', _purple, _saveM3u)),
         ]),
         const SizedBox(height: 17),
+        Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          const Text('Concurrent checks:', style: TextStyle(fontSize: 11)),
+          SizedBox(width: 62, height: 34, child: TextField(
+            controller: _workers,
+            keyboardType: TextInputType.number,
+          )),
+          const Text('More workers may be faster but use more network resources.',
+              style: TextStyle(color: Colors.white54, fontSize: 10)),
+        ]),
+        const SizedBox(height: 7),
         Text('${_testing ? 'Testing...' : 'Ready.'}  Loaded: ${_loaded.length}  '
-            '| Tested: $_tested | HTTP OK: ${_checks.values.where((e) => e.reachable).length}',
+            '| Tested: $_tested | HTTP OK: $_reachable',
             style: const TextStyle(color: _cyan, fontSize: 11)),
         const SizedBox(height: 18),
         Row(children: [
@@ -672,7 +825,7 @@ class _StudioHomeState extends State<StudioHome> {
           _action('Clear Loaded', const Color(0xff9d171e), () {
             _cancelTesting = true;
             _player.stop();
-            setState(() { _loaded.clear(); _checks.clear(); _tested = 0; _current = null; });
+            setState(() { _loaded.clear(); _checks.clear(); _tested = 0; _reachable = 0; _current = null; });
             _log('[CLEAR] Loaded list cleared');
           }, width: 112),
           _action('Delete', const Color(0xffb72d30), () {

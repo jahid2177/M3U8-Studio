@@ -27,18 +27,19 @@ void main() {
     expect(channels.single.url, 'https://example.com/3/12');
   });
 
-  test('rejects reversed and excessive ranges', () {
+  test('rejects reversed ranges and accepts more than five thousand values', () {
     expect(() => RangeGenerator.numberRange('5', '1', 'ID'), throwsFormatException);
-    expect(() => RangeGenerator.numberRange('1', '10000', 'ID'), throwsFormatException);
+    expect(RangeGenerator.numberRange('1', '10000', 'ID'), hasLength(10000));
     expect(() => RangeGenerator.ipRange('192.168.1.20', '192.168.1.1'), throwsFormatException);
   });
 
-  test('caps Cartesian product at five thousand links', () {
-    expect(() => RangeGenerator.generate(
+  test('allows Cartesian products larger than the former limit', () {
+    final generated = RangeGenerator.generate(
       pattern: 'http://example.com/{id}/{cdn-numer}',
       ids: RangeGenerator.numberRange('1', '100', 'ID'),
       cdns: RangeGenerator.numberRange('1', '100', 'CDN'),
       ips: ['127.0.0.1'], ports: ['80'],
-    ), throwsFormatException);
+    );
+    expect(generated, hasLength(10000));
   });
 }
