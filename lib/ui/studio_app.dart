@@ -255,8 +255,9 @@ class _StudioHomeState extends State<StudioHome> {
           (mimeType.startsWith('audio/') && !mimeType.contains('mpegurl'))) {
         return null;
       }
-      temporary = await Directory.systemTemp.createTemp('m3u8_playlist_');
-      final file = File('${temporary.path}${Platform.pathSeparator}downloaded.txt');
+      final downloadDirectory = await Directory.systemTemp.createTemp('m3u8_playlist_');
+      temporary = downloadDirectory;
+      final file = File('${downloadDirectory.path}${Platform.pathSeparator}downloaded.txt');
       final outputSink = file.openWrite();
       sink = outputSink;
       var received = 0;
@@ -273,7 +274,7 @@ class _StudioHomeState extends State<StudioHome> {
           if (!recognizable) {
             await outputSink.close();
             sink = null;
-            await temporary.delete(recursive: true);
+            await downloadDirectory.delete(recursive: true);
             temporary = null;
             return null;
           }
