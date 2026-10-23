@@ -1,0 +1,58 @@
+name: M3U8 Studio - Windows x64
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Analyze, Test, Build Windows
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Enable Windows desktop and generate native runner
+        shell: pwsh
+        run: |
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows --project-name=m3u8_studio --no-pub .
+
+      - name: Download Dart and Flutter dependencies
+        run: flutter pub get
+
+      - name: Analyze project
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run unit tests
+        run: flutter test
+
+      - name: Build Windows x64 executable
+        run: flutter build windows --release
+
+      - name: Package full release directory
+        shell: pwsh
+        run: |
+          $releasePath = 'build/windows/x64/runner/Release'
+          if (-not (Test-Path $releasePath)) {
+            throw "Expected Windows build directory does not exist: $releasePath"
+          }
+          Compress-Archive -Path "$releasePath/*" -DestinationPath 'M3U8-Studio-Windows-x64.zip' -Force
+
+      - name: Upload portable Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: M3U8-Studio-Windows-x64
+          path: M3U8-Studio-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
