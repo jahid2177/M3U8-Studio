@@ -7,8 +7,8 @@ on:
 
 jobs:
   windows:
-    name: Analyze, Test, Build Windows
-    runs-on: windows-latest
+    name: Analyze, Test, Build Windows and Setup EXE
+    runs-on: windows-2025
     permissions:
       contents: read
 
@@ -39,6 +39,32 @@ jobs:
 
       - name: Build Windows x64 executable
         run: flutter build windows --release
+
+      - name: Build one-click Windows installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $compiler = @(
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe'
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            $installed = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($installed) { $compiler = $installed.Source }
+          }
+          if (-not $compiler) { throw 'Inno Setup compiler ISCC.exe was not found.' }
+          & $compiler 'm3u8-studio-setup.iss'
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path 'build/installer/M3U8-Studio-Setup-x64.exe')) {
+            throw 'Installer EXE was not generated.'
+          }
+
+      - name: Upload one-click installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: M3U8-Studio-One-Click-Installer-x64
+          path: build/installer/M3U8-Studio-Setup-x64.exe
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Package full release directory
         shell: pwsh
