@@ -1,17 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../core/background_jobs.dart';
 import '../core/channel.dart';
 import '../core/playlist_parser.dart';
-import '../core/range_generator.dart';
 import '../core/stream_checker.dart';
 import 'json_splitter_page.dart';
 
@@ -184,32 +184,20 @@ class _StudioHomeState extends State<StudioHome> {
     if (_generating) return;
     setState(() => _generating = true);
     try {
-      final idSource = _idSource;
-      final idFrom = _idFrom.text;
-      final idTo = _idTo.text;
-      final randomCount = _randomCount.text;
-      final idsText = _idsText.text;
-      final pattern = _pattern.text;
-      final cdnFrom = _cdnFrom.text;
-      final cdnTo = _cdnTo.text;
-      final ipFrom = _ipFrom.text;
-      final ipTo = _ipTo.text;
-      final portFrom = _portFrom.text;
-      final portTo = _portTo.text;
-      final channels = await Isolate.run(() {
-        final ids = switch (idSource) {
-          'Random IDs' => RangeGenerator.randomIds(idFrom, idTo, randomCount),
-          'Pasted ID list' || 'Uploaded ID list' => RangeGenerator.idList(idsText),
-          _ => RangeGenerator.numberRange(idFrom, idTo, 'ID'),
-        };
-        return RangeGenerator.generate(
-          pattern: pattern,
-          ids: ids,
-          cdns: RangeGenerator.numberRange(cdnFrom, cdnTo, 'CDN'),
-          ips: RangeGenerator.ipRange(ipFrom, ipTo),
-          ports: RangeGenerator.numberRange(portFrom, portTo, 'port'),
-        );
-      });
+      final channels = await compute(generateRangeInBackground, (
+        idSource: _idSource,
+        idFrom: _idFrom.text,
+        idTo: _idTo.text,
+        randomCount: _randomCount.text,
+        idsText: _idsText.text,
+        pattern: _pattern.text,
+        cdnFrom: _cdnFrom.text,
+        cdnTo: _cdnTo.text,
+        ipFrom: _ipFrom.text,
+        ipTo: _ipTo.text,
+        portFrom: _portFrom.text,
+        portTo: _portTo.text,
+      ));
       if (channels.isEmpty) throw const FormatException('No valid HTTP(S) URLs generated.');
       if (!mounted) return;
       _load(channels);
@@ -305,10 +293,8 @@ class _StudioHomeState extends State<StudioHome> {
     }
   }
 
-  Future<List<Channel>> _parsePlaylistFile(String path, String source) => Isolate.run(() async {
-        final content = await File(path).readAsString();
-        return PlaylistParser.parse(content, source: source);
-      });
+  Future<List<Channel>> _parsePlaylistFile(String path, String source) =>
+      compute(parsePlaylistFileInBackground, (path: path, source: source));
 
   Future<void> _import() async {
     if (_importing) return;
@@ -326,7 +312,8 @@ class _StudioHomeState extends State<StudioHome> {
         } else {
           final content = utf8.decode(await picked.readAsBytes(), allowMalformed: true);
           setState(() => _importStatus = 'Parsing $sourceName in background...');
-          channels = await Isolate.run(() => PlaylistParser.parse(content, source: sourceName));
+          channels = await compute(parsePlaylistTextInBackground,
+              (input: content, source: sourceName));
         }
       } else {
         File? downloaded;
@@ -344,7 +331,8 @@ class _StudioHomeState extends State<StudioHome> {
             channels = await _parsePlaylistFile(downloaded.path, raw);
           } else {
             setState(() => _importStatus = 'Parsing input in background...');
-            channels = await Isolate.run(() => PlaylistParser.parse(raw, source: 'Pasted input'));
+            channels = await compute(parsePlaylistTextInBackground,
+                (input: raw, source: 'Pasted input'));
           }
         } finally {
           if (downloaded != null) {

@@ -15,6 +15,7 @@ A dark, Windows-focused IPTV playlist and stream tester based on four interface 
 - Embedded mpv-based player with Play/Pause/Stop and volume. Entries are added to the export list when the player reports that playback started.
 - Rename/reorder/remove export entries; save as M3U.
 - Json Spliter: inspect root array/object or wrapper arrays, split by number of parts or items per part, preserve wrapper metadata and JSON validity, keep formatting/pretty/minify, export individual files, all parts, or compressed ZIP.
+- Json Spliter and playlist/ID jobs use Flutter `compute()` with top-level functions, avoiding the Windows "unsendable WidgetsFlutterBinding in isolate" crash when selecting JSON files.
 
 ### Important distinction
 
@@ -27,12 +28,16 @@ The app has no remote license activation, bundled IPTV accounts, stream credenti
 1. Create a **new GitHub repository** (for example `M3U8-Studio`).
 2. Upload **all contents of this project** to the repository root, including `.github/workflows/windows-build.yml`.
 3. Open **Actions → M3U8 Studio - Windows x64 → Run workflow**. A push to `main` or `master` also starts a build.
-4. Wait for the workflow to complete. Open the workflow run and download the `M3U8-Studio-Windows-x64` artifact.
-5. Extract `M3U8-Studio-Windows-x64.zip` and run `m3u8_studio.exe` from the extracted folder.
+4. Wait for the workflow to complete. Open the workflow run and download **`M3U8-Studio-One-Click-Installer-x64`**.
+5. Extract the artifact ZIP, then double-click **`M3U8-Studio-Setup-x64.exe`**. The installer copies the whole application, adds Desktop/Start menu shortcuts, registers an uninstaller, and can launch M3U8 Studio afterward.
+
+For a portable version that does not install anything, download the separate `M3U8-Studio-Windows-x64` artifact, extract its ZIP, and run `m3u8_studio.exe` from the extracted folder.
 
 **Do not distribute only the `.exe`:** keep its `data` directory and DLL files together. The artifact contains the portable release folder.
 
-The workflow generates the standard Flutter Windows native runner on the Windows GitHub runner, runs `flutter analyze` and `flutter test`, builds the release, and zips the complete runner output. No API keys or GitHub secrets are required.
+The workflow uses a Windows 2025 runner with Inno Setup, generates the Flutter Windows native runner, runs `flutter analyze` and `flutter test`, builds the release, compiles a single `Setup.exe` including the native DLLs and `data` folder, and uploads both the installer and the portable archive. No API keys or GitHub secrets are required.
+
+The one-click installer is **per-user**, so no admin password is required for normal installation. It installs under `%LOCALAPPDATA%\\Programs\\M3U8 Studio`, creates Desktop and Start Menu shortcuts, and supports uninstall through Windows Settings. The installer is not code-signed; Windows SmartScreen may show an **Unknown publisher** warning. Build or distribute signed installers with your own trusted certificate if you need to avoid this warning.
 
 ## Local Windows development
 
@@ -65,6 +70,7 @@ lib/
     playlist_parser.dart     M3U/JSON parsing, URL validation, deduplication
     range_generator.dart     Numeric/IP/port combinations
     json_splitter_service.dart  Split JSON and create ZIP archives
+    background_jobs.dart       Top-level background workers (UI isolate safety)
     stream_checker.dart      Bounded HTTP reachability tests
   ui/
     studio_app.dart          Five-page Windows-style UI and media player
@@ -73,7 +79,9 @@ test/
   playlist_parser_test.dart
   range_generator_test.dart
   json_splitter_test.dart
+  background_jobs_test.dart
 .github/workflows/windows-build.yml
+m3u8-studio-setup.iss          One-click Windows installer definition
 ```
 
 ## Known limitations

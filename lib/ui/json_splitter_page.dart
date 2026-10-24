@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../core/background_jobs.dart';
 import '../core/json_splitter_service.dart';
 
 const _surface = Color(0xff1c1c1c);
@@ -49,7 +50,12 @@ class _JsonSplitterPageState extends State<JsonSplitterPage> {
 
   void _message(String text) {
     if (!mounted) return;
-    setState(() => _status = text);
+    // Flutter exceptions can contain entire UI object graphs in their text.
+    // Show a useful single-line explanation without filling the whole page.
+    final summary = text.split('\n').first;
+    setState(() => _status = summary.length > 260
+        ? '${summary.substring(0, 260)}…'
+        : summary);
   }
 
   Future<void> _pickFile() async {
@@ -75,7 +81,7 @@ class _JsonSplitterPageState extends State<JsonSplitterPage> {
         await File(path).writeAsBytes(await file.readAsBytes());
       }
       final sourcePath = path;
-      final inspection = await Isolate.run(() => JsonSplitterService.inspectFile(sourcePath));
+      final inspection = await compute(inspectJsonInBackground, sourcePath);
       if (!mounted) return;
       setState(() {
         _inspection = inspection;
@@ -123,7 +129,7 @@ class _JsonSplitterPageState extends State<JsonSplitterPage> {
       final base = _baseController.text;
       final format = _format;
       final mode = _mode;
-      final produced = await Isolate.run(() => JsonSplitterService.splitFile(
+      final produced = await compute(splitJsonInBackground, (
         sourcePath: source,
         outputDirectory: tempPath,
         targetIndex: targetIndex,
@@ -191,7 +197,7 @@ class _JsonSplitterPageState extends State<JsonSplitterPage> {
       final name = '${JsonSplitterService.safeBaseName(_baseController.text)}-parts.zip';
       final destination = await JsonSplitterService.availablePath(directory, name);
       final parts = List<JsonSplitPart>.from(_generated);
-      await Isolate.run(() => JsonSplitterService.exportZip(parts, destination));
+      await compute(zipJsonInBackground, (parts: parts, destination: destination));
       _message('ZIP saved: $destination');
     } catch (e) {
       _message('ZIP export failed: $e');
